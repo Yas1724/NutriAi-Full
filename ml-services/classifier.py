@@ -1,8 +1,8 @@
 """
 FitAI - classifier.py
 ======================
-Loads the trained EfficientNet-B2 model and runs food classification inference.
-Place this file in: fitai/backend/model/classifier.py
+Loads the trained ConvNeXt Tiny model and runs food classification inference.
+Place this file in: ml-services/classifier.py
 """
 
 import torch
@@ -14,10 +14,10 @@ import io
 from pathlib import Path
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-MODEL_PATH = Path(__file__).parent / "efficientnet_b2_best.pth"
+MODEL_PATH = Path(__file__).parent / "convnext_tiny_best.pth"
 
 # ── Image transform (must match Phase 1 eval_transform_b2) ───────────────────
-IMG_SIZE = 260
+IMG_SIZE = 224
 TRANSFORM = T.Compose([
     T.Resize((IMG_SIZE, IMG_SIZE)),
     T.ToTensor(),
@@ -43,15 +43,15 @@ class FoodClassifier:
         if not MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"Model file not found at {MODEL_PATH}. "
-                f"Make sure efficientnet_b2_best.pth is in fitai/backend/model/"
+                f"Make sure convnext_tiny_best.pth is in ml-services/"
             )
 
         print(f"Loading model from {MODEL_PATH}...")
-        checkpoint = torch.load(MODEL_PATH, map_location=self.device)
+        checkpoint = torch.load(MODEL_PATH, map_location=self.device, weights_only=False)  # PyTorch 2.6 fix
 
         # Read metadata saved during Phase 1 training
         self.classes = checkpoint["classes"]
-        model_name   = checkpoint.get("model_name", "efficientnet_b2")
+        model_name   = checkpoint.get("model_name", "convnext_tiny")
         num_classes  = len(self.classes)
 
         print(f"  Architecture : {model_name}")
