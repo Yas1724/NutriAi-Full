@@ -57,11 +57,19 @@ Endpoints:
     POST /rag/populate              re-populate ChromaDB (admin)
 """
 
+import asyncio
+import sys
+
+# Windows fix: psycopg3 requires SelectorEventLoop
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 import json
 import logging
 import os
 import re
 from datetime import date
+from pathlib import Path
 from typing import Optional, AsyncIterator
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, BackgroundTasks
@@ -70,7 +78,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load local .env first, then root .env
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env", override=False)
 log = logging.getLogger("nutriai.main")
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -82,9 +92,15 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins  = ["*"],
-    allow_methods  = ["*"],
-    allow_headers  = ["*"],
+    allow_origins     = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        os.getenv("CLIENT_URL", "http://localhost:5173"),
+    ],
+    allow_methods     = ["*"],
+    allow_headers     = ["*"],
+    allow_credentials = True,
 )
 
 
@@ -99,30 +115,39 @@ async def startup():
     from database import create_tables
     await create_tables()
 
-    # 2. Load EfficientNet-B2 classifier
+    # 2. Load ConvNeXt Tiny classifier
     try:
         from classifier import get_classifier
         get_classifier()
     except FileNotFoundError:
         log.warning("Model file not found — /predict endpoint will be unavailable")
 
-    # 3. Pre-populate nutrition cache (all DB dishes → instant lookup)
-    from nutrition import prepopulate_cache
-    prepopulate_cache()
+    # 3. Pre-populate nutrition cache (set SKIP_CACHE_PREPOPULATE=true to skip on dev)
+    if not os.getenv("SKIP_CACHE_PREPOPULATE"):
+        from nutrition import prepopulate_cache
+        prepopulate_cache()
+    else:
+        log.info("Nutrition cache pre-population skipped")
 
-    # 4. Populate ChromaDB with nutrition_db (skips if already done)
-    try:
-        from rag import populate_nutrition_db
-        populate_nutrition_db()
-    except Exception as e:
-        log.warning(f"RAG pre-population skipped: {e}")
+    # 4. Populate ChromaDB (set SKIP_RAG=true to skip on dev)
+    if not os.getenv("SKIP_RAG"):
+        try:
+            from rag import populate_nutrition_db
+            populate_nutrition_db()
+        except Exception as e:
+            log.warning(f"RAG pre-population skipped: {e}")
+    else:
+        log.info("RAG pre-population skipped")
 
-    # 5. Initialize chatbot graph + PostgreSQL checkpointer
-    try:
-        from chatbot import get_graph
-        await get_graph()
-    except Exception as e:
-        log.warning(f"Chatbot graph init skipped: {e}")
+    # 5. Initialize chatbot graph (set SKIP_CHATBOT_INIT=true to skip on dev)
+    if not os.getenv("SKIP_CHATBOT_INIT"):
+        try:
+            from chatbot import get_graph
+            await get_graph()
+        except Exception as e:
+            log.warning(f"Chatbot graph init skipped: {e}")
+    else:
+        log.info("Chatbot graph init skipped")
 
     log.info("NutriAI backend v3 ready ✅")
 
@@ -267,7 +292,7 @@ def health():
     c = get_classifier()
     return {
         "status" : "ok",
-        "model"  : "EfficientNet-B2",
+        "model"  : "ConvNeXt-Tiny",
         "classes": len(c.classes),
         "device" : str(c.device),
     }
