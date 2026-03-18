@@ -16,7 +16,7 @@ export const searchNutrition = async (req, res) => {
     }
 
     try {
-        const { data } = await axios.post(`${ML}/nutrition`, { dish: dish.trim() });
+        const { data } = await axios.post(`${ML}/nutrition`, { dish_name: dish.trim() });
 
         res.status(200).json({
             success: true,
@@ -61,7 +61,7 @@ export const classifyFood = async (req, res) => {
             contentType: req.file.mimetype,
         });
 
-        const { data } = await axios.post(`${ML}/classify`, form, {
+        const { data } = await axios.post(`${ML}/predict`, form, {
             headers: form.getHeaders(),
             maxContentLength: Infinity,
             maxBodyLength: Infinity,
