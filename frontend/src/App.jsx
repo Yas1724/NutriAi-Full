@@ -562,7 +562,7 @@ const ACTIVITY = [
   { value: "very_active",       label: "Very Active",       desc: "Exercise 6-7 days/week" },
   { value: "extra_active",      label: "Extra Active",      desc: "Athlete / physical job" },
 ];
-const TOTAL_STEPS = 7;
+const TOTAL_STEPS = 8;
 
 function ProgressDots({ step }) {
   const { theme } = useTheme();
@@ -605,8 +605,34 @@ function OnboardingScreen({ onDone, setToast }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ gender: "", age: "", height: "", weight: "", goal: "", activityLevel: "sedentary", targetWeight: "", durationWeeks: "", mealsPerDay: "", customMealName: "" });
+  const [ocrFile, setOcrFile]           = useState(null);
+  const [ocrPreview, setOcrPreview]     = useState(null);
+  const [ocrScanning, setOcrScanning]   = useState(false);
+  const [ocrResult, setOcrResult]       = useState(null);   // { matched, unmatched }
+  const [ocrConfirmed, setOcrConfirmed] = useState([]);     // dishes user kept
+  const [ocrSaving, setOcrSaving]       = useState(false);
+  const ocrFileRef = useRef();
 
   const set = (k, v) => { setForm(p => ({ ...p, [k]: v })); setError(""); };
+
+  // Step 7 → submit profile first, then move to OCR step
+  const submitAndNext = async () => {
+    if (!validate()) return;
+    setLoading(true);
+    try {
+      const data = await apiFetch(PROFILE, "/setup", {
+        age: Number(form.age), height: Number(form.height), weight: Number(form.weight),
+        gender: form.gender, goal: form.goal, activityLevel: form.activityLevel,
+        targetWeight: form.targetWeight ? Number(form.targetWeight) : Number(form.weight),
+        durationWeeks: form.durationWeeks ? Number(form.durationWeeks) : null,
+        mealsPerDay: Number(form.mealsPerDay),
+        customMealName: form.customMealName.trim() || null,
+      });
+      if (data.success) { setStep(8); }
+      else setError(data.message || "Something went wrong");
+    } catch { setError("Could not connect to server"); }
+    finally { setLoading(false); }
+  };
   const validate = () => {
     if (step === 1 && !form.gender) { setError("Please select your gender"); return false; }
     if (step === 2) {
@@ -641,21 +667,58 @@ function OnboardingScreen({ onDone, setToast }) {
   const next = () => { if (validate()) setStep(s => s + 1); };
   const back = () => { setError(""); setStep(s => s - 1); };
   const submit = async () => {
-    if (!validate()) return;
-    setLoading(true);
+    // Step 8: save OCR menu then finish onboarding
+    setOcrSaving(true);
     try {
-      const data = await apiFetch(PROFILE, "/setup", {
-        age: Number(form.age), height: Number(form.height), weight: Number(form.weight),
-        gender: form.gender, goal: form.goal, activityLevel: form.activityLevel,
-        targetWeight: form.targetWeight ? Number(form.targetWeight) : Number(form.weight),
-        durationWeeks: form.durationWeeks ? Number(form.durationWeeks) : null,
-        mealsPerDay: Number(form.mealsPerDay),
-        customMealName: form.customMealName.trim() || null,
+      if (ocrConfirmed.length > 0) {
+        await fetch(`${ML}/ocr/save-menu`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+          credentials: "include",
+          body: JSON.stringify({ dishes: ocrConfirmed, institution_id: "default" }),
+        });
+      }
+      setToast({ msg: "Your plan is ready! 🎉", type: "success" });
+      // Fetch fresh profile after setup (was saved in submitAndNext)
+      const profileData = await apiFetch(PROFILE, "/", undefined, "GET");
+      if (profileData.success) onDone(profileData);
+      else onDone({});
+    } catch { setToast({ msg: "Menu save failed, but your plan is ready!", type: "success" }); onDone({}); }
+    finally { setOcrSaving(false); }
+  };
+
+  const skipOcr = () => {
+    setToast({ msg: "Your plan is ready! 🎉", type: "success" });
+    apiFetch(PROFILE, "/", undefined, "GET").then(d => { if (d.success) onDone(d); else onDone({}); });
+  };
+
+  const scanMenu = async () => {
+    if (!ocrFile) return;
+    setOcrScanning(true); setOcrResult(null); setOcrConfirmed([]);
+    try {
+      const form2 = new FormData();
+      form2.append("file", ocrFile);
+      const res = await fetch(`${ML}/ocr/scan`, {
+        method: "POST",
+        headers: { "ngrok-skip-browser-warning": "true" },
+        credentials: "include",
+        body: form2,
       });
-      if (data.success) { setToast({ msg: "Your plan is ready! 🎉", type: "success" }); onDone(data); }
-      else setError(data.message || "Something went wrong");
-    } catch { setError("Could not connect to server"); }
-    finally { setLoading(false); }
+      if (!res.ok) throw new Error("OCR failed");
+      const data = await res.json();
+      setOcrResult(data);
+      setOcrConfirmed(data.matched || []);
+    } catch (e) {
+      setError("Could not scan menu. Try a clearer photo.");
+    } finally { setOcrScanning(false); }
+  };
+
+  const toggleDish = (dish) => {
+    setOcrConfirmed(prev =>
+      prev.find(d => d.dish === dish.dish)
+        ? prev.filter(d => d.dish !== dish.dish)
+        : [...prev, dish]
+    );
   };
 
   const H2    = { margin: 0, fontSize: 22, fontWeight: 900, color: t.textPrimary, letterSpacing: "-0.02em", fontFamily: "'DM Sans', 'Inter', sans-serif" };
@@ -794,6 +857,96 @@ function OnboardingScreen({ onDone, setToast }) {
           </div>
         )}
       </>);
+      case 8: return (<>
+        <h2 style={H2}>Scan Your Mess Menu 🍽️</h2>
+        <p style={SUB}>Upload a photo of your mess/canteen menu — we'll auto-detect dishes and save them for quick logging.</p>
+
+        {!ocrResult ? (
+          <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 14 }}>
+            {/* Photo picker */}
+            <div
+              onClick={() => ocrFileRef.current?.click()}
+              style={{
+                border: `2px dashed ${ocrPreview ? "transparent" : t.cardBorder}`,
+                borderRadius: 16, minHeight: 160,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                cursor: "pointer", overflow: "hidden", background: t.inputBg,
+                position: "relative",
+              }}
+            >
+              {ocrPreview
+                ? <img src={ocrPreview} alt="menu" style={{ width: "100%", maxHeight: 220, objectFit: "cover" }} />
+                : <div style={{ textAlign: "center", padding: 24 }}>
+                    <div style={{ fontSize: 36, marginBottom: 8 }}>📸</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Tap to upload menu photo</div>
+                    <div style={{ fontSize: 11, color: t.textMuted, marginTop: 4 }}>JPG, PNG up to 10MB</div>
+                  </div>
+              }
+            </div>
+            <input ref={ocrFileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={e => {
+              const f = e.target.files?.[0];
+              if (!f) return;
+              setOcrFile(f);
+              setOcrPreview(URL.createObjectURL(f));
+              setOcrResult(null);
+            }} />
+
+            {ocrPreview && (
+              <button onClick={scanMenu} disabled={ocrScanning} style={{
+                background: ocrScanning ? t.btnSecBg : t.accentGrad,
+                border: "none", borderRadius: 12, padding: "13px",
+                color: ocrScanning ? t.textMuted : t.accentText,
+                fontWeight: 800, fontSize: 14, cursor: ocrScanning ? "not-allowed" : "pointer",
+                fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              }}>
+                {ocrScanning
+                  ? <><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 1s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>Scanning menu…</>
+                  : "🔍 Scan Menu"}
+              </button>
+            )}
+          </div>
+        ) : (
+          <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, color: t.textSecondary, textTransform: "uppercase", letterSpacing: 1 }}>
+              {ocrResult.total_found} dishes found · {ocrConfirmed.length} selected
+            </div>
+            <div style={{ maxHeight: 280, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+              {(ocrResult.matched || []).map((dish, i) => {
+                const selected = !!ocrConfirmed.find(d => d.dish === dish.dish);
+                return (
+                  <button key={i} onClick={() => toggleDish(dish)} style={{
+                    width: "100%", padding: "10px 14px", borderRadius: 12, textAlign: "left",
+                    border: `1.5px solid ${selected ? t.choiceBorderSel : t.choiceBorder}`,
+                    background: selected ? t.choiceBgSel : t.choiceBg,
+                    color: selected ? t.choiceTextSel : t.choiceText,
+                    fontFamily: "inherit", cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, textTransform: "capitalize" }}>
+                        {dish.display_name || dish.dish.replace(/_/g, " ")}
+                      </div>
+                      <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>
+                        {dish.calories} kcal · P:{dish.protein}g C:{dish.carbs}g F:{dish.fats}g
+                      </div>
+                    </div>
+                    {selected && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>}
+                  </button>
+                );
+              })}
+            </div>
+            {ocrResult.unmatched?.length > 0 && (
+              <div style={{ fontSize: 11, color: t.textMuted, padding: "8px 12px", background: t.inputBg, borderRadius: 10 }}>
+                Could not identify: {ocrResult.unmatched.slice(0, 5).join(", ")}
+              </div>
+            )}
+            <button onClick={() => { setOcrResult(null); setOcrPreview(null); setOcrFile(null); }} style={{
+              background: "none", border: `1px solid ${t.cardBorder}`, borderRadius: 10,
+              padding: "8px 14px", color: t.textMuted, cursor: "pointer", fontFamily: "inherit", fontSize: 12,
+            }}>↩ Rescan</button>
+          </div>
+        )}
+      </>);
       default: return null;
     }
   };
@@ -811,10 +964,24 @@ function OnboardingScreen({ onDone, setToast }) {
         <ProgressDots step={step} />
         {renderStep()}
         {error && <p style={{ color: "#dc2626", fontSize: 12.5, textAlign: "center", marginTop: 12, fontWeight: 600 }}>{error}</p>}
-        <div style={{ marginTop: 22 }}>
-          <Btn onClick={step === TOTAL_STEPS ? submit : next} loading={loading}>
-            {step === TOTAL_STEPS ? "Get My Plan 🚀" : "Continue ›"}
+        <div style={{ marginTop: 22, display: "flex", flexDirection: "column", gap: 8 }}>
+          <Btn
+            onClick={step === TOTAL_STEPS ? submit : (step === 7 ? submitAndNext : next)}
+            loading={loading || ocrSaving}
+          >
+            {step === TOTAL_STEPS
+              ? (ocrConfirmed.length > 0 ? `Save ${ocrConfirmed.length} Dishes & Finish 🚀` : "Finish Setup 🚀")
+              : step === 7 ? "Continue to Mess Menu →"
+              : "Continue ›"}
           </Btn>
+          {step === TOTAL_STEPS && (
+            <button onClick={skipOcr} style={{
+              background: "none", border: "none", color: t.textMuted,
+              fontFamily: "inherit", fontSize: 13, cursor: "pointer", padding: "4px",
+            }}>
+              Skip for now →
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -1037,6 +1204,7 @@ function scaleMacros(base, consumedGrams) {
 function MealSearchPanel({ onAdd, setToast, mealType = "snack", compact = false }) {
   const { theme } = useTheme();
   const t = THEMES[theme];
+  const [tab, setTab] = useState("search");   // "search" | "menu"
   const [query, setQuery] = useState("");
   const [qty, setQty] = useState(1);
   const [unit, setUnit] = useState("piece");
@@ -1044,7 +1212,52 @@ function MealSearchPanel({ onAdd, setToast, mealType = "snack", compact = false 
   const [confirming, setConfirming] = useState(false);
   const [raw, setRaw] = useState(null);
   const [pending, setPending] = useState(null);
+  const [menuDishes, setMenuDishes] = useState(null);
+  const [menuLoading, setMenuLoading] = useState(false);
   const inputRef = useRef();
+
+  // Fetch mess menu when switching to menu tab
+  useEffect(() => {
+    if (tab !== "menu" || menuDishes !== null) return;
+    setMenuLoading(true);
+    fetch(`${ML}/menu/default`, {
+      headers: { "ngrok-skip-browser-warning": "true" },
+      credentials: "include",
+    })
+      .then(r => r.json())
+      .then(data => setMenuDishes(data.menu || {}))
+      .catch(() => setMenuDishes({}))
+      .finally(() => setMenuLoading(false));
+  }, [tab]);
+
+  const addFromMenu = async (dish) => {
+    if (confirming) return;
+    setConfirming(true);
+    try {
+      await apiFetch(FOODLOG, "", {
+        dishName:  dish.display_name || dish.dish_key?.replace(/_/g, " "),
+        mealType,
+        calories:  dish.calories || 0,
+        proteinG:  dish.protein_g || 0,
+        carbsG:    dish.carbs_g || 0,
+        fatG:      dish.fats_g || 0,
+        portionG:  dish.portion_g || 100,
+        source:    "menu",
+        loggedVia: "search",
+      });
+      onAdd({
+        dishName: dish.display_name || dish.dish_key?.replace(/_/g, " "),
+        calories: dish.calories || 0,
+        proteinG: dish.protein_g || 0,
+        carbsG:   dish.carbs_g || 0,
+        fatG:     dish.fats_g || 0,
+        id: Date.now(),
+      });
+      setToast({ msg: `${dish.display_name || dish.dish_key} logged!`, type: "success" });
+    } catch {
+      setToast({ msg: "Failed to log meal", type: "error" });
+    } finally { setConfirming(false); }
+  };
 
   useEffect(() => {
     if (!raw) return;
@@ -1098,109 +1311,164 @@ function MealSearchPanel({ onAdd, setToast, mealType = "snack", compact = false 
   const canSearch = query.trim() && !loading;
   const canConfirm = pending && !confirming && Number(qty) > 0 && (pending.calories > 0 || pending.proteinG > 0);
 
+  const slotDishes = menuDishes ? (menuDishes[mealType] || Object.values(menuDishes).flat()) : [];
+
   return (
     <div style={{ marginTop: 20 }}>
       <div style={{ fontSize: 10, fontWeight: 800, color: t.textMuted, letterSpacing: 1.6, textTransform: "uppercase", marginBottom: 12 }}>Log a Meal</div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <input ref={inputRef} value={query}
-          onChange={e => { setQuery(e.target.value); setRaw(null); setPending(null); }}
-          onKeyDown={e => e.key === "Enter" && canSearch && search()}
-          placeholder="e.g. eggs, chapati, dal…"
-          style={{ flex: 1, background: t.inputBg, border: `1.5px solid ${t.inputBorder}`, borderRadius: 12, padding: "12px 14px", color: t.inputText, fontFamily: "'DM Sans', 'Inter', sans-serif", fontSize: 14, outline: "none" }}
-          onFocus={e => e.target.style.borderColor = t.inputBorderFocus}
-          onBlur={e => e.target.style.borderColor = t.inputBorder}
-        />
-        <button onClick={search} disabled={!canSearch} style={{
-          background: canSearch ? t.accentGrad : t.btnSecBg,
-          border: "none", borderRadius: 12, padding: "12px 18px",
-          color: canSearch ? t.accentText : t.textMuted,
-          fontWeight: 800, fontFamily: "'DM Sans', 'Inter', sans-serif", fontSize: 13,
-          cursor: canSearch ? "pointer" : "not-allowed",
-          minWidth: 76, display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          {loading
-            ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 1s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>
-            : "Search"}
-        </button>
+      {/* Tab switcher */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 14, background: t.inputBg, borderRadius: 12, padding: 4 }}>
+        {[
+          { key: "search", label: "🔍 Search" },
+          { key: "menu",   label: "🍽️ Mess Menu" },
+        ].map(tb => (
+          <button key={tb.key} onClick={() => setTab(tb.key)} style={{
+            flex: 1, padding: "8px 0", borderRadius: 9,
+            background: tab === tb.key ? t.accent : "transparent",
+            color: tab === tb.key ? t.accentText : t.textMuted,
+            border: "none", fontFamily: "inherit", fontWeight: 700,
+            fontSize: 12, cursor: "pointer",
+          }}>{tb.label}</button>
+        ))}
       </div>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <div style={{ display: "flex", alignItems: "center", background: t.inputBg, border: `1.5px solid ${t.inputBorder}`, borderRadius: 12, overflow: "hidden" }}>
-          <button onClick={() => setQty(q => Math.max(0.5, Number(q) - (unit === "g" || unit === "ml" ? 25 : 0.5)))}
-            style={{ background: "none", border: "none", color: t.textMuted, fontSize: 18, padding: "0 12px", height: 44, cursor: "pointer", lineHeight: 1, fontFamily: "inherit" }}>−</button>
-          <input type="number" value={qty} min={0.5}
-            step={unit === "g" || unit === "ml" || unit === "kg" ? 25 : 0.5}
-            onChange={e => setQty(Math.max(0.5, Number(e.target.value) || 1))}
-            style={{ width: 50, textAlign: "center", background: "none", border: "none", color: t.inputText, fontWeight: 900, fontSize: 14, fontFamily: "inherit", outline: "none", MozAppearance: "textfield" }} />
-          <button onClick={() => setQty(q => Number(q) + (unit === "g" || unit === "ml" ? 25 : 0.5))}
-            style={{ background: "none", border: "none", color: t.textMuted, fontSize: 18, padding: "0 12px", height: 44, cursor: "pointer", lineHeight: 1, fontFamily: "inherit" }}>+</button>
-        </div>
-        <div style={{ display: "flex", gap: 5, overflowX: "auto", flex: 1, paddingBottom: 2 }}>
-          {UNITS.map(u => (
-            <button key={u.value} onClick={() => setUnit(u.value)} style={{
-              flexShrink: 0, padding: "7px 10px", borderRadius: 8,
-              border: `1.5px solid ${unit === u.value ? t.unitActiveBorder : t.unitInactiveBorder}`,
-              background: unit === u.value ? t.unitActiveBg : t.unitInactiveBg,
-              color: unit === u.value ? t.unitActiveText : t.unitInactiveText,
-              fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', 'Inter', sans-serif",
-            }}>{u.label}</button>
-          ))}
-        </div>
-      </div>
-
-      {raw && (
-        <div style={{ marginTop: 7, fontSize: 11, color: t.textMuted }}>
-          ≈ <span style={{ color: t.textSecondary, fontWeight: 700 }}>{Math.round(toGrams(Number(qty) || 1, unit, raw.portion_g))}g</span>
-          {" "}· base {raw.portion_g}g per {raw.dish}
+      {/* Mess menu tab */}
+      {tab === "menu" && (
+        <div>
+          {menuLoading && <div style={{ textAlign: "center", color: t.textMuted, fontSize: 13, padding: 20 }}>Loading menu…</div>}
+          {!menuLoading && slotDishes.length === 0 && (
+            <div style={{ textAlign: "center", padding: 20 }}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>🍽️</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>No menu saved yet</div>
+              <div style={{ fontSize: 12, color: t.textMuted, marginTop: 4 }}>Scan your mess menu during onboarding or use Search to log meals.</div>
+            </div>
+          )}
+          {!menuLoading && slotDishes.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 320, overflowY: "auto" }}>
+              {slotDishes.map((dish, i) => (
+                <button key={i} onClick={() => addFromMenu(dish)} style={{
+                  width: "100%", padding: "11px 14px", borderRadius: 12,
+                  border: `1px solid ${t.cardBorder}`, background: t.inputBg,
+                  textAlign: "left", cursor: "pointer", fontFamily: "inherit",
+                  display: "flex", justifyContent: "space-between", alignItems: "center",
+                }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary, textTransform: "capitalize" }}>
+                      {dish.display_name || dish.dish_key?.replace(/_/g, " ")}
+                    </div>
+                    <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>
+                      {dish.calories} kcal · P:{dish.protein_g}g · {dish.serving_desc || "1 serving"}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 18, color: t.accent, fontWeight: 800, flexShrink: 0, marginLeft: 8 }}>+</div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {pending && (
-        <div style={{ marginTop: 12, background: t.resultBg, border: `1px solid ${t.resultBorder}`, borderRadius: 14, padding: "14px 16px", animation: "fadeUp 0.2s ease" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
-            <div>
-              {/* FIXED: pending.dishName */}
-              <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, marginBottom: 2, textTransform: "capitalize" }}>{pending.dishName}</div>
-              <div style={{ fontSize: 11, color: t.textSecondary }}>{qty} {unit} · {pending.portion_g}g</div>
-            </div>
-            <div style={{ textAlign: "right" }}>
-              <div style={{ fontSize: 28, fontWeight: 900, color: t.textPrimary, fontFamily: "'DM Sans', 'Inter', sans-serif", lineHeight: 1 }}>{pending.calories}</div>
-              <div style={{ fontSize: 10, color: t.textMuted, letterSpacing: 1, fontWeight: 700 }}>KCAL</div>
-            </div>
+      {/* Search tab */}
+      {tab === "search" && <>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          <input ref={inputRef} value={query}
+            onChange={e => { setQuery(e.target.value); setRaw(null); setPending(null); }}
+            onKeyDown={e => e.key === "Enter" && canSearch && search()}
+            placeholder="e.g. eggs, chapati, dal…"
+            style={{ flex: 1, background: t.inputBg, border: `1.5px solid ${t.inputBorder}`, borderRadius: 12, padding: "12px 14px", color: t.inputText, fontFamily: "'DM Sans', 'Inter', sans-serif", fontSize: 14, outline: "none" }}
+            onFocus={e => e.target.style.borderColor = t.inputBorderFocus}
+            onBlur={e => e.target.style.borderColor = t.inputBorder}
+          />
+          <button onClick={search} disabled={!canSearch} style={{
+            background: canSearch ? t.accentGrad : t.btnSecBg,
+            border: "none", borderRadius: 12, padding: "12px 18px",
+            color: canSearch ? t.accentText : t.textMuted,
+            fontWeight: 800, fontFamily: "'DM Sans', 'Inter', sans-serif", fontSize: 13,
+            cursor: canSearch ? "pointer" : "not-allowed",
+            minWidth: 76, display: "flex", alignItems: "center", justifyContent: "center",
+          }}>
+            {loading
+              ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 1s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>
+              : "Search"}
+          </button>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", background: t.inputBg, border: `1.5px solid ${t.inputBorder}`, borderRadius: 12, overflow: "hidden" }}>
+            <button onClick={() => setQty(q => Math.max(0.5, Number(q) - (unit === "g" || unit === "ml" ? 25 : 0.5)))}
+              style={{ background: "none", border: "none", color: t.textMuted, fontSize: 18, padding: "0 12px", height: 44, cursor: "pointer", lineHeight: 1, fontFamily: "inherit" }}>−</button>
+            <input type="number" value={qty} min={0.5}
+              step={unit === "g" || unit === "ml" || unit === "kg" ? 25 : 0.5}
+              onChange={e => setQty(Math.max(0.5, Number(e.target.value) || 1))}
+              style={{ width: 50, textAlign: "center", background: "none", border: "none", color: t.inputText, fontWeight: 900, fontSize: 14, fontFamily: "inherit", outline: "none", MozAppearance: "textfield" }} />
+            <button onClick={() => setQty(q => Number(q) + (unit === "g" || unit === "ml" ? 25 : 0.5))}
+              style={{ background: "none", border: "none", color: t.textMuted, fontSize: 18, padding: "0 12px", height: 44, cursor: "pointer", lineHeight: 1, fontFamily: "inherit" }}>+</button>
           </div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-            {/* FIXED: pending.proteinG, pending.carbsG, pending.fatG */}
-            {[
-              { l: "Protein", v: pending.proteinG, c: t.accent },
-              { l: "Carbs",   v: pending.carbsG,   c: t.textSecondary },
-              { l: "Fat",     v: pending.fatG,      c: t.textMuted },
-            ].map(m => (
-              <div key={m.l} style={{ flex: 1, textAlign: "center", background: t.macroBg, borderRadius: 10, padding: "8px 4px" }}>
-                <div style={{ fontSize: 16, fontWeight: 900, color: m.c, fontFamily: "'DM Sans', 'Inter', sans-serif" }}>{m.v}g</div>
-                <div style={{ fontSize: 9, color: t.textMuted, textTransform: "uppercase", letterSpacing: 1.2, marginTop: 2, fontWeight: 700 }}>{m.l}</div>
-              </div>
+          <div style={{ display: "flex", gap: 5, overflowX: "auto", flex: 1, paddingBottom: 2 }}>
+            {UNITS.map(u => (
+              <button key={u.value} onClick={() => setUnit(u.value)} style={{
+                flexShrink: 0, padding: "7px 10px", borderRadius: 8,
+                border: `1.5px solid ${unit === u.value ? t.unitActiveBorder : t.unitInactiveBorder}`,
+                background: unit === u.value ? t.unitActiveBg : t.unitInactiveBg,
+                color: unit === u.value ? t.unitActiveText : t.unitInactiveText,
+                fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', 'Inter', sans-serif",
+              }}>{u.label}</button>
             ))}
           </div>
-          {pending.source && <div style={{ fontSize: 10, color: t.textMuted, marginBottom: 12, textTransform: "uppercase", letterSpacing: 0.8 }}>Source: {pending.source}</div>}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={confirm} disabled={!canConfirm} style={{
-              flex: 1, background: !canConfirm ? t.textMuted : t.accentGrad,
-              border: "none", borderRadius: 10, padding: "11px",
-              fontWeight: 800, fontSize: 13, fontFamily: "'DM Sans', 'Inter', sans-serif",
-              cursor: !canConfirm ? "not-allowed" : "pointer",
-              color: t.accentText,
-              boxShadow: !canConfirm ? "none" : `0 4px 14px ${t.accentGlow}`,
-              opacity: !canConfirm ? 0.7 : 1,
-            }}>{confirming ? "Adding..." : !canConfirm && Number(qty) <= 0 ? "Enter qty > 0" : "+ Add to Log"}</button>
-            <button onClick={dismiss} style={{
-              background: t.btnSecBg, border: `1px solid ${t.btnSecBorder}`, borderRadius: 10,
-              padding: "11px 14px", color: t.btnSecText, cursor: "pointer",
-              fontFamily: "'DM Sans', 'Inter', sans-serif", fontSize: 13, fontWeight: 600,
-            }}>Cancel</button>
-          </div>
         </div>
-      )}
+
+        {raw && (
+          <div style={{ marginTop: 7, fontSize: 11, color: t.textMuted }}>
+            ≈ <span style={{ color: t.textSecondary, fontWeight: 700 }}>{Math.round(toGrams(Number(qty) || 1, unit, raw.portion_g))}g</span>
+            {" "}· base {raw.portion_g}g per {raw.dish}
+          </div>
+        )}
+
+        {pending && (
+          <div style={{ marginTop: 12, background: t.resultBg, border: `1px solid ${t.resultBorder}`, borderRadius: 14, padding: "14px 16px", animation: "fadeUp 0.2s ease" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: t.textPrimary, marginBottom: 2, textTransform: "capitalize" }}>{pending.dishName}</div>
+                <div style={{ fontSize: 11, color: t.textSecondary }}>{qty} {unit} · {pending.portion_g}g</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 28, fontWeight: 900, color: t.textPrimary, fontFamily: "'DM Sans', 'Inter', sans-serif", lineHeight: 1 }}>{pending.calories}</div>
+                <div style={{ fontSize: 10, color: t.textMuted, letterSpacing: 1, fontWeight: 700 }}>KCAL</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              {[
+                { l: "Protein", v: pending.proteinG, c: t.accent },
+                { l: "Carbs",   v: pending.carbsG,   c: t.textSecondary },
+                { l: "Fat",     v: pending.fatG,      c: t.textMuted },
+              ].map(m => (
+                <div key={m.l} style={{ flex: 1, textAlign: "center", background: t.macroBg, borderRadius: 10, padding: "8px 4px" }}>
+                  <div style={{ fontSize: 16, fontWeight: 900, color: m.c, fontFamily: "'DM Sans', 'Inter', sans-serif" }}>{m.v}g</div>
+                  <div style={{ fontSize: 9, color: t.textMuted, textTransform: "uppercase", letterSpacing: 1.2, marginTop: 2, fontWeight: 700 }}>{m.l}</div>
+                </div>
+              ))}
+            </div>
+            {pending.source && <div style={{ fontSize: 10, color: t.textMuted, marginBottom: 12, textTransform: "uppercase", letterSpacing: 0.8 }}>Source: {pending.source}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={confirm} disabled={!canConfirm} style={{
+                flex: 1, background: !canConfirm ? t.textMuted : t.accentGrad,
+                border: "none", borderRadius: 10, padding: "11px",
+                fontWeight: 800, fontSize: 13, fontFamily: "'DM Sans', 'Inter', sans-serif",
+                cursor: !canConfirm ? "not-allowed" : "pointer",
+                color: t.accentText,
+                boxShadow: !canConfirm ? "none" : `0 4px 14px ${t.accentGlow}`,
+                opacity: !canConfirm ? 0.7 : 1,
+              }}>{confirming ? "Adding..." : !canConfirm && Number(qty) <= 0 ? "Enter qty > 0" : "+ Add to Log"}</button>
+              <button onClick={dismiss} style={{
+                background: t.btnSecBg, border: `1px solid ${t.btnSecBorder}`, borderRadius: 10,
+                padding: "11px 14px", color: t.btnSecText, cursor: "pointer",
+                fontFamily: "'DM Sans', 'Inter', sans-serif", fontSize: 13, fontWeight: 600,
+              }}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </>}  {/* end search tab */}
     </div>
   );
 }
@@ -1888,6 +2156,217 @@ function PublicProgressPage() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  CHAT PAGE
+// ─────────────────────────────────────────────────────────────────────────────
+const QUICK_CHIPS = [
+  "What should I eat today?",
+  "High protein Indian meals",
+  "Calories in dal rice?",
+  "Meal prep ideas",
+];
+
+const WELCOME_MESSAGE = {
+  id: "welcome",
+  role: "assistant",
+  text: "Hey! 👋 I'm your NutriAi coach. Ask me anything — meal ideas, calorie counts, macro tips, or Indian food nutrition. What's on your mind?",
+};
+
+function TypingDots() {
+  const dotBase = {
+    width: 7, height: 7, borderRadius: "50%", background: "#555",
+    display: "inline-block", margin: "0 2px",
+  };
+  return (
+    <>
+      <style>{`
+        @keyframes nutriDot {
+          0%,60%,100% { transform:translateY(0); background:#555; }
+          30% { transform:translateY(-5px); background:#999; }
+        }
+      `}</style>
+      <span style={{ ...dotBase, animation: "nutriDot 1.2s 0s infinite ease-in-out" }} />
+      <span style={{ ...dotBase, animation: "nutriDot 1.2s 0.2s infinite ease-in-out" }} />
+      <span style={{ ...dotBase, animation: "nutriDot 1.2s 0.4s infinite ease-in-out" }} />
+    </>
+  );
+}
+
+function ChatPage({ user, profileData }) {
+  const { theme } = useTheme();
+  const t = THEMES[theme];
+  const [messages, setMessages] = useState([WELCOME_MESSAGE]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [chipsVisible, setChipsVisible] = useState(true);
+  const bottomRef = useRef(null);
+  const textareaRef = useRef(null);
+
+  const targets = profileData?.dailyTargets;
+  const profile = profileData?.profile;
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const autoResize = (el) => {
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 90) + "px";
+  };
+
+  const send = async (text) => {
+    const trimmed = (text || input).trim();
+    if (!trimmed || loading) return;
+    setError("");
+    setInput("");
+    setChipsVisible(false);
+    if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+    const userMsg = { id: Date.now(), role: "user", text: trimmed };
+    setMessages(prev => [...prev, userMsg]);
+    setLoading(true);
+
+    try {
+      // ML /chat expects: { user_id, message, thread_id? }
+      // It fetches user profile itself from DB using user_id
+      // user UUID lives in profileData.profile.id (from /check-auth → data.user.profile.id)
+      const userId = profileData?.profile?.id || profileData?.id || user?.email;
+      console.log("[ChatPage] userId:", userId, "profileData:", profileData);
+
+      const res = await fetch(`${ML}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        credentials: "include",
+        body: JSON.stringify({
+          user_id  : userId,
+          message  : trimmed,
+          thread_id: userId,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(typeof errData.detail === "string" ? errData.detail : `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const reply = data.response || data.message || "Sorry, I couldn't process that.";
+      setMessages(prev => [...prev, { id: Date.now() + 1, role: "assistant", text: reply }]);
+    } catch (err) {
+      setError(typeof err.message === "string" ? err.message : "Couldn't reach the nutrition AI.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const bubbleBg   = (isUser) => isUser ? t.accent         : t.inputBg;
+  const bubbleText = (isUser) => isUser ? t.accentText      : t.textPrimary;
+  const bubbleRadius = (isUser) => isUser
+    ? "18px 18px 4px 18px"
+    : "18px 18px 18px 4px";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: t.cardBg, fontFamily: "'DM Sans','Inter',sans-serif", overflow: "hidden" }}>
+
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "20px 20px 14px", borderBottom: `1px solid ${t.cardBorder}`, flexShrink: 0 }}>
+        <div style={{ width: 38, height: 38, borderRadius: "50%", background: "linear-gradient(135deg,#3a7bd5,#5e5ce6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>🥗</div>
+        <div style={{ flex: 1 }}>
+          <p style={{ margin: 0, color: t.textPrimary, fontSize: 15, fontWeight: 700, letterSpacing: "-0.2px" }}>NutriAi Assistant</p>
+          <p style={{ margin: 0, color: t.textMuted, fontSize: 12 }}>Your personal nutrition coach</p>
+        </div>
+        <div style={{ width: 8, height: 8, background: "#30d158", borderRadius: "50%" }} />
+      </div>
+
+      {/* Messages */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+        {messages.map(msg => {
+          const isUser = msg.role === "user";
+          return (
+            <div key={msg.id} style={{ display: "flex", alignItems: "flex-end", gap: 8, flexDirection: isUser ? "row-reverse" : "row" }}>
+              {!isUser && (
+                <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3a7bd5,#5e5ce6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>🥗</div>
+              )}
+              <div style={{
+                maxWidth: 240, padding: "10px 13px",
+                borderRadius: bubbleRadius(isUser),
+                background: bubbleBg(isUser),
+                color: bubbleText(isUser),
+                fontSize: 13.5, lineHeight: 1.55,
+                wordBreak: "break-word", whiteSpace: "pre-wrap",
+                border: isUser ? "none" : `1px solid ${t.cardBorder}`,
+              }}>
+                {msg.text}
+              </div>
+            </div>
+          );
+        })}
+
+        {loading && (
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+            <div style={{ width: 28, height: 28, borderRadius: "50%", background: "linear-gradient(135deg,#3a7bd5,#5e5ce6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>🥗</div>
+            <div style={{ padding: "12px 16px", borderRadius: "18px 18px 18px 4px", background: t.inputBg, border: `1px solid ${t.cardBorder}` }}>
+              <TypingDots />
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Quick chips */}
+      {chipsVisible && (
+        <div style={{ padding: "6px 14px 0", display: "flex", gap: 6, flexWrap: "wrap", flexShrink: 0 }}>
+          {QUICK_CHIPS.map(chip => (
+            <button key={chip} onClick={() => send(chip)} style={{
+              background: t.inputBg, border: `1px solid ${t.cardBorder}`,
+              color: t.textSecondary, fontSize: 11.5, padding: "5px 11px",
+              borderRadius: 20, cursor: "pointer", whiteSpace: "nowrap",
+              fontFamily: "inherit",
+            }}>{chip}</button>
+          ))}
+        </div>
+      )}
+
+      {error && <p style={{ color: "#ff6b6b", fontSize: 12, textAlign: "center", padding: "4px 14px", flexShrink: 0 }}>{error}</p>}
+
+      {/* Input row */}
+      <div style={{ padding: "10px 14px 16px", display: "flex", gap: 8, alignItems: "flex-end", flexShrink: 0 }}>
+        <textarea
+          ref={textareaRef}
+          rows={1}
+          value={input}
+          onChange={e => { setInput(e.target.value); autoResize(e.target); }}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder="Ask about nutrition..."
+          style={{
+            flex: 1, background: t.inputBg, border: `1px solid ${t.inputBorder}`,
+            borderRadius: 22, padding: "10px 14px", color: t.inputText,
+            fontSize: 13.5, fontFamily: "inherit", resize: "none", outline: "none",
+            lineHeight: 1.4, maxHeight: 90, overflowY: "auto",
+          }}
+        />
+        <button
+          onClick={() => send()}
+          disabled={loading || !input.trim()}
+          style={{
+            width: 38, height: 38,
+            background: loading || !input.trim() ? t.inputBg : t.accent,
+            border: `1px solid ${t.cardBorder}`,
+            borderRadius: "50%", cursor: loading || !input.trim() ? "default" : "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            flexShrink: 0, transition: "background 0.2s",
+            opacity: loading || !input.trim() ? 0.4 : 1,
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path d="M14 8L2 2l3 6-3 6 12-6z" fill={loading || !input.trim() ? t.textMuted : t.accentText} />
+          </svg>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  BOTTOM NAV
 // ─────────────────────────────────────────────────────────────────────────────
 function BottomNav({ setToast, profileData }) {
@@ -1929,6 +2408,8 @@ function BottomNav({ setToast, profileData }) {
           icon: (on) => <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke={on ? t.accent : t.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> },
         { label: "Camera",   route: null,            active: false,                    action: () => setShowCamera(true),
           icon: (_) => <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke={t.accent} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg> },
+        { label: "Chat",     route: "/chat-page",    active: path === "/chat-page",    action: null,
+          icon: (on) => <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke={on ? t.accent : t.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg> },
         { label: "Profile",  route: "/profile-page", active: path === "/profile-page", action: null,
           icon: (on) => <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke={on ? t.accent : t.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg> },
       ].map(tab => (
@@ -2470,7 +2951,7 @@ function AppInner() {
   };
 
   const location = useLocation();
-  const isApp = ["/dashboard", "/progress-page", "/profile-page"].includes(location.pathname);
+  const isApp = ["/dashboard", "/progress-page", "/profile-page", "/chat-page"].includes(location.pathname);
   const isDashboard = isApp;
 
   if (initializing) return (
@@ -2556,6 +3037,13 @@ function AppInner() {
                   element={
                     <ProtectedRoute user={user}>
                       <ProfilePage profileData={profileData} setProfileData={setProfileData} onLogout={handleLogout} setToast={setToast} />
+                    </ProtectedRoute>
+                  }
+                />
+                <Route path="/chat-page"
+                  element={
+                    <ProtectedRoute user={user}>
+                      <ChatPage user={user} profileData={profileData} />
                     </ProtectedRoute>
                   }
                 />
