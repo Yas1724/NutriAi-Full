@@ -842,9 +842,13 @@ async def chat_endpoint(request: ChatRequest):
     from database import get_user_profile
     from chatbot import chat
 
-    profile = await get_user_profile(request.user_id)
-    if not profile:
-        raise HTTPException(404, "User not found. Complete onboarding first.")
+    # Try to get profile — fall back to empty dict if DB lookup fails
+    try:
+        from database import get_user_profile
+        profile = await get_user_profile(request.user_id) or {}
+    except Exception as db_err:
+        log.warning(f"Profile fetch failed (non-fatal): {db_err}")
+        profile = {}
 
     try:
         response = await chat(
