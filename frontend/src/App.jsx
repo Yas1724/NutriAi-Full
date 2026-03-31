@@ -2479,7 +2479,7 @@ function ImageUploadModal({ onClose, onLogged, setToast, profileData }) {
     try {
       const form = new FormData();
       form.append("file", imageFile);
-      const res  = await fetch(`${ML}/classify`, { method: "POST", body: form });
+      const res  = await fetch(`${ML}/predict`, { method: "POST", body: form });
       const json = await res.json();
       setResult(json);
       if (json.is_uncertain) {
@@ -2728,6 +2728,192 @@ function ImageUploadModal({ onClose, onLogged, setToast, profileData }) {
 // ─────────────────────────────────────────────────────────────────────────────
 //  PROFILE PAGE
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  MESS MENU SECTION (used in ProfilePage)
+// ─────────────────────────────────────────────────────────────────────────────
+function MessMenuSection({ setToast, t }) {
+  const [expanded, setExpanded]     = useState(false);
+  const [file, setFile]             = useState(null);
+  const [preview, setPreview]       = useState(null);
+  const [scanning, setScanning]     = useState(false);
+  const [result, setResult]         = useState(null);
+  const [confirmed, setConfirmed]   = useState([]);
+  const [saving, setSaving]         = useState(false);
+  const [menuCount, setMenuCount]   = useState(null);
+  const fileRef                     = useRef();
+
+  // Fetch existing menu count when expanded
+  useEffect(() => {
+    if (!expanded || menuCount !== null) return;
+    fetch(`${ML}/menu/default`, {
+      headers: { "ngrok-skip-browser-warning": "true" },
+      credentials: "include",
+    })
+      .then(r => r.json())
+      .then(d => setMenuCount(d.total_dishes || 0))
+      .catch(() => setMenuCount(0));
+  }, [expanded]);
+
+  const pickFile = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 10 * 1024 * 1024) { setToast({ msg: "Image too large. Max 10MB.", type: "error" }); return; }
+    setFile(f);
+    setPreview(URL.createObjectURL(f));
+    setResult(null); setConfirmed([]);
+  };
+
+  const scan = async () => {
+    if (!file) return;
+    setScanning(true);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch(`${ML}/ocr/scan`, {
+        method: "POST",
+        headers: { "ngrok-skip-browser-warning": "true" },
+        credentials: "include",
+        body: form,
+      });
+      if (!res.ok) throw new Error("OCR failed");
+      const data = await res.json();
+      setResult(data);
+      setConfirmed(data.matched || []);
+    } catch {
+      setToast({ msg: "Could not scan menu. Try a clearer photo.", type: "error" });
+    } finally { setScanning(false); }
+  };
+
+  const toggleDish = (dish) => {
+    setConfirmed(prev =>
+      prev.find(d => d.dish === dish.dish)
+        ? prev.filter(d => d.dish !== dish.dish)
+        : [...prev, dish]
+    );
+  };
+
+  const save = async () => {
+    if (!confirmed.length) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`${ML}/ocr/save-menu`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" },
+        credentials: "include",
+        body: JSON.stringify({ dishes: confirmed, institution_id: "default" }),
+      });
+      if (!res.ok) throw new Error();
+      setToast({ msg: `${confirmed.length} dishes saved to your mess menu!`, type: "success" });
+      setMenuCount(confirmed.length);
+      setResult(null); setFile(null); setPreview(null); setConfirmed([]);
+    } catch {
+      setToast({ msg: "Could not save menu. Try again.", type: "error" });
+    } finally { setSaving(false); }
+  };
+
+  const reset = () => { setResult(null); setFile(null); setPreview(null); setConfirmed([]); };
+
+  return (
+    <div style={{ padding: "0 24px 0", marginBottom: 20 }}>
+      {/* Section header — tappable to expand */}
+      <button onClick={() => setExpanded(e => !e)} style={{
+        width: "100%", background: t.statsCardBg, border: `1px solid ${t.statsCardBorder}`,
+        borderRadius: 14, padding: "14px 16px", cursor: "pointer", fontFamily: "inherit",
+        display: "flex", justifyContent: "space-between", alignItems: "center",
+      }}>
+        <div style={{ textAlign: "left" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: t.textPrimary }}>🍽️ Mess Menu</div>
+          <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>
+            {menuCount === null ? "Loading…" : menuCount > 0 ? `${menuCount} dishes saved` : "No menu saved yet"}
+          </div>
+        </div>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={t.textMuted} strokeWidth="2.5"
+          style={{ transform: expanded ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+
+      {expanded && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 12 }}>
+
+          {!result ? (<>
+            {/* Photo picker */}
+            <div onClick={() => fileRef.current?.click()} style={{
+              border: `2px dashed ${preview ? "transparent" : t.cardBorder}`,
+              borderRadius: 14, minHeight: 140, overflow: "hidden",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer", background: t.inputBg, position: "relative",
+            }}>
+              {preview
+                ? <img src={preview} alt="menu" style={{ width: "100%", maxHeight: 180, objectFit: "cover" }} />
+                : <div style={{ textAlign: "center", padding: 20 }}>
+                    <div style={{ fontSize: 28, marginBottom: 6 }}>📸</div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: t.textPrimary }}>Upload mess menu photo</div>
+                    <div style={{ fontSize: 11, color: t.textMuted, marginTop: 3 }}>Tap to select image</div>
+                  </div>
+              }
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={pickFile} />
+
+            {preview && (
+              <button onClick={scan} disabled={scanning} style={{
+                background: scanning ? t.btnSecBg : t.accentGrad, border: "none",
+                borderRadius: 12, padding: "12px", color: scanning ? t.textMuted : t.accentText,
+                fontWeight: 800, fontSize: 13, cursor: scanning ? "not-allowed" : "pointer",
+                fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+              }}>
+                {scanning
+                  ? <><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" style={{ animation: "spin 1s linear infinite" }}><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>Scanning…</>
+                  : "🔍 Scan Menu"}
+              </button>
+            )}
+          </>) : (<>
+            {/* Results */}
+            <div style={{ fontSize: 12, fontWeight: 700, color: t.textSecondary }}>
+              {result.total_found} dishes found · {confirmed.length} selected
+            </div>
+            <div style={{ maxHeight: 240, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+              {(result.matched || []).map((dish, i) => {
+                const sel = !!confirmed.find(d => d.dish === dish.dish);
+                return (
+                  <button key={i} onClick={() => toggleDish(dish)} style={{
+                    width: "100%", padding: "10px 14px", borderRadius: 10, textAlign: "left",
+                    border: `1.5px solid ${sel ? t.choiceBorderSel : t.choiceBorder}`,
+                    background: sel ? t.choiceBgSel : t.choiceBg,
+                    fontFamily: "inherit", cursor: "pointer",
+                    display: "flex", justifyContent: "space-between", alignItems: "center",
+                  }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: sel ? t.choiceTextSel : t.choiceText, textTransform: "capitalize" }}>
+                        {dish.display_name || dish.dish?.replace(/_/g, " ")}
+                      </div>
+                      <div style={{ fontSize: 11, color: t.textMuted, marginTop: 1 }}>
+                        {dish.calories} kcal · P:{dish.protein}g
+                      </div>
+                    </div>
+                    {sel && <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={t.choiceTextSel} strokeWidth="2.5"><polyline points="20 6 9 17 4 12"/></svg>}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={save} disabled={saving || !confirmed.length} style={{
+                flex: 1, background: !confirmed.length ? t.btnSecBg : t.accentGrad, border: "none",
+                borderRadius: 10, padding: "11px", color: !confirmed.length ? t.textMuted : t.accentText,
+                fontWeight: 800, fontSize: 13, cursor: !confirmed.length ? "not-allowed" : "pointer", fontFamily: "inherit",
+              }}>{saving ? "Saving…" : `Save ${confirmed.length} Dishes`}</button>
+              <button onClick={reset} style={{
+                background: t.btnSecBg, border: `1px solid ${t.btnSecBorder}`, borderRadius: 10,
+                padding: "11px 14px", color: t.btnSecText, cursor: "pointer", fontFamily: "inherit", fontSize: 13,
+              }}>↩ Rescan</button>
+            </div>
+          </>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProfilePage({ profileData, onLogout, setToast }) {
   const { theme, setThemeMode } = useTheme();
   const t = THEMES[theme];
@@ -2817,6 +3003,9 @@ function ProfilePage({ profileData, onLogout, setToast }) {
             })()}
           </div>
         )}
+
+        {/* Mess Menu Section */}
+        <MessMenuSection setToast={setToast} t={t} />
 
         {/* Settings */}
         <div style={{ padding: "0 24px 24px", display: "flex", flexDirection: "column", gap: 10, borderTop: `1px solid ${t.divider}`, paddingTop: 20 }}>
