@@ -16,38 +16,129 @@ const getPredictedTargets = async (profileData) => {
     }
 };
 
-const calculateFallbackTargets = ({ age, gender, weight, height, activityLevel, goal }) => {
+const calculateFallbackTargets = ({
+    age,
+    gender,
+    weight,
+    height,
+    activityLevel,
+    goal
+}) => {
+
+    // ─────────────────────────────
+    // 1. Calculate BMR (Mifflin-St Jeor)
+    // ─────────────────────────────
     let bmr = gender === "male"
         ? 10 * weight + 6.25 * height - 5 * age + 5
         : 10 * weight + 6.25 * height - 5 * age - 161;
 
+    // ─────────────────────────────
+    // 2. Activity multiplier → TDEE
+    // ─────────────────────────────
     const activityMultipliers = {
-        sedentary: 1.2, lightly_active: 1.375,
-        moderately_active: 1.55, very_active: 1.725, extra_active: 1.9
+        sedentary: 1.2,
+        lightly_active: 1.375,
+        moderately_active: 1.55,
+        very_active: 1.725,
+        extra_active: 1.9
     };
+
     let tdee = bmr * (activityMultipliers[activityLevel] || 1.2);
 
+    // ─────────────────────────────
+    // 3. Adjust calories by goal
+    // ─────────────────────────────
     let calories;
+
     switch (goal) {
-        case "lose_weight":  calories = Math.round(tdee - 500); break;
-        case "gain_weight":  calories = Math.round(tdee + 300); break;
-        case "build_muscle": calories = Math.round(tdee + 200); break;
-        default:             calories = Math.round(tdee);
+        case "lose_weight":
+            calories = Math.round(tdee - 500);
+            break;
+
+        case "gain_weight":
+            calories = Math.round(tdee + 300);
+            break;
+
+        case "build_muscle":
+            calories = Math.round(tdee + 200);
+            break;
+
+        default:
+            calories = Math.round(tdee);
     }
 
-    let proteinRatio, carbRatio, fatRatio;
+    // ─────────────────────────────
+    // 4. FIXED: Protein per kg method
+    // ─────────────────────────────
+    let proteinPerKg;
+
     switch (goal) {
-        case "build_muscle": proteinRatio=0.35; carbRatio=0.40; fatRatio=0.25; break;
-        case "lose_weight":  proteinRatio=0.40; carbRatio=0.30; fatRatio=0.30; break;
-        case "gain_weight":  proteinRatio=0.25; carbRatio=0.50; fatRatio=0.25; break;
-        default:             proteinRatio=0.30; carbRatio=0.40; fatRatio=0.30;
+
+        case "build_muscle":
+            proteinPerKg = 1.8;
+            break;
+
+        case "lose_weight":
+            proteinPerKg = 2.0;
+            break;
+
+        case "gain_weight":
+            proteinPerKg = 1.6;
+            break;
+
+        default:
+            proteinPerKg = 1.4;
     }
+
+    let protein_g = Math.round(weight * proteinPerKg);
+
+    // Safety cap (prevents insane values)
+    protein_g = Math.min(protein_g, Math.round(weight * 2.2));
+
+    // ─────────────────────────────
+    // 5. Fat calculation (25–30%)
+    // ─────────────────────────────
+    let fatRatio;
+
+    switch (goal) {
+
+        case "lose_weight":
+            fatRatio = 0.30;
+            break;
+
+        case "build_muscle":
+            fatRatio = 0.25;
+            break;
+
+        case "gain_weight":
+            fatRatio = 0.25;
+            break;
+
+        default:
+            fatRatio = 0.30;
+    }
+
+    let fat_g = Math.round((calories * fatRatio) / 9);
+
+    // ─────────────────────────────
+    // 6. Remaining calories → carbs
+    // ─────────────────────────────
+    let proteinCalories = protein_g * 4;
+    let fatCalories = fat_g * 9;
+
+    let remainingCalories =
+        calories - proteinCalories - fatCalories;
+
+    let carbs_g = Math.round(remainingCalories / 4);
+
+    // Safety check
+    carbs_g = Math.max(carbs_g, 0);
 
     return {
         calories,
-        protein_g: Math.round((calories * proteinRatio) / 4),
-        carbs_g:   Math.round((calories * carbRatio)   / 4),
-        fat_g:     Math.round((calories * fatRatio)    / 9)
+        protein_g,
+        carbs_g,
+        fat_g
     };
 };
 
