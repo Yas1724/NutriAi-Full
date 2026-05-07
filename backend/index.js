@@ -22,7 +22,7 @@ const app = express();
 app.use(helmet());
 
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'https://nutriai-frontend-xi.vercel.app/',
+  origin: process.env.CLIENT_URL || 'https://nutri-ai-full.vercel.app/',
   credentials: true,
 }));
 
