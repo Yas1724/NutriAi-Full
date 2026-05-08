@@ -85,9 +85,27 @@ log = logging.getLogger("nutriai.main")
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title       = "NutriAI API",
-    description = "Agentic nutrition assistant for Indian college mess students",
-    version     = "3.0.0",
+    title="NutriAI API",
+    description="Agentic nutrition assistant for Indian college mess students",
+    version="3.0.0",
+)
+
+allowed_origins = [
+    "http://localhost:5173",
+    "https://nutri-ai-full.vercel.app",
+    "https://nutri-ai-full-git-main-yashrajs-projects-59876e26.vercel.app",
+]
+
+client_url = os.getenv("CLIENT_URL")
+if client_url:
+    allowed_origins.append(client_url)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.add_middleware(
