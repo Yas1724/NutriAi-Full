@@ -21,9 +21,25 @@ const app = express();
 
 app.use(helmet());
 
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://nutri-ai-full.vercel.app",
+  process.env.CLIENT_URL
+].filter(Boolean);
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'https://nutri-ai-full.vercel.app',
-  credentials: true,
+  origin: function (origin, callback) {
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      origin.endsWith(".vercel.app")
+    ) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS blocked: ${origin}`));
+    }
+  },
+  credentials: true
 }));
 
 app.use(express.json({ limit: '2mb' }));
