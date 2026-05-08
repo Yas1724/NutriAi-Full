@@ -20,6 +20,7 @@ dotenv.config();
 const app = express();
 
 app.use(helmet());
+app.set("trust proxy", 1);
 
 const allowedOrigins = [
   "http://localhost:5173",
