@@ -68,6 +68,7 @@ import json
 import logging
 import os
 import re
+import gdown
 from datetime import date
 from pathlib import Path
 from typing import Optional, AsyncIterator
@@ -123,6 +124,31 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+MODEL_PATH = Path(__file__).parent / "convnext_tiny_best.pth"
+
+def download_model_if_missing():
+    if MODEL_PATH.exists():
+        print(f"Model already exists at {MODEL_PATH}")
+        return
+
+    model_url = os.getenv("MODEL_URL")
+
+    if not model_url:
+        raise FileNotFoundError(
+            f"Model file not found at {MODEL_PATH} and MODEL_URL is not set."
+        )
+
+    print("Model file missing. Downloading from Google Drive...")
+    gdown.download(model_url, str(MODEL_PATH), quiet=False, fuzzy=True)
+
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Model download failed. File still missing at {MODEL_PATH}"
+        )
+
+    print(f"Model downloaded successfully at {MODEL_PATH}")
+
+download_model_if_missing()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # STARTUP
