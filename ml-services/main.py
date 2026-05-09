@@ -139,7 +139,7 @@ def download_model_if_missing():
         )
 
     print("Model file missing. Downloading from Google Drive...")
-    gdown.download(model_url, str(MODEL_PATH), quiet=False, fuzzy=True)
+    gdown.download(model_url, str(MODEL_PATH), quiet=False)
 
     if not MODEL_PATH.exists():
         raise FileNotFoundError(
