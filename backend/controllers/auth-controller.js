@@ -75,7 +75,18 @@ export const login = async (req, res) => {
         }
 
         generateJWTToken(res, user.id);
-        res.status(200).json({ success: true, msg: "Login successfully" });
+        res.status(200).json({
+            success: true,
+            msg: "Login successfully",
+            user: {
+                id:           user.id,
+                name:         user.name,
+                email:        user.email,
+                isVerified:   user.isVerified,
+                profile:      user.profile,
+                dailyTargets: user.dailyTargets,
+            },
+        });
     } catch (error) {
         console.error("Error logging in:", error);
         res.status(400).json({ success: false, msg: error.message });
