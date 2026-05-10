@@ -148,6 +148,19 @@ const calculateFallbackTargets = ({
 export const setupProfile = async (req, res) => {
     const { age, height, weight, gender, goal, activityLevel, targetWeight } = req.body;
     try {
+        // If this user has already completed onboarding, do not force them
+        // through setup again on a new device. Return their existing profile.
+        const existingUser = await User.findById(req.userId);
+        if (existingUser?.profile?.isOnboarded) {
+            return res.status(200).json({
+                success: true,
+                message: "Profile already setup",
+                alreadyOnboarded: true,
+                profile:      existingUser.profile,
+                dailyTargets: existingUser.dailyTargets,
+            });
+        }
+
         if (!age || !height || !weight || !gender || !goal) {
             return res.status(400).json({ success: false, message: "Age, height, weight, gender and goal are required" });
         }
