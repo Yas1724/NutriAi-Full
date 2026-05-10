@@ -413,7 +413,12 @@ function LoginScreen({ setToast, setUser }) {
     setLoading(true);
     const data = await apiFetch(API, "/login", { email, password });
     setLoading(false);
-    if (data.success) { setToast({ msg: "Welcome back!", type: "success" }); setUser({ email }); }
+    if (data.success) {
+      setToast({ msg: "Welcome back!", type: "success" });
+      // Prefer the DB-backed user returned by /login so an already-onboarded
+      // user can go straight to the dashboard even on a new device.
+      setUser(data.user || { email });
+    }
     else setToast({ msg: data.msg || data.message || "Login failed", type: "error" });
   };
   return (
@@ -3065,6 +3070,12 @@ function ProtectedRoute({ children, user }) {
   return children;
 }
 
+function OnboardingRoute({ children, user, profileData }) {
+  if (!user) return <Navigate to="/" replace />;
+  if (profileData?.profile?.isOnboarded) return <Navigate to="/dashboard" replace />;
+  return children;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  RESET PASSWORD PAGE (reads token from URL params)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3149,6 +3160,15 @@ function AppInner() {
 
   const handleUser = async (u) => {
     setUser(u);
+
+    // /login now returns the DB-backed profile. If onboarding was already
+    // completed on another device, do not send the user through onboarding again.
+    if (u?.profile?.isOnboarded) {
+      setProfileData(u);
+      navigate("/dashboard", { replace: true });
+      return;
+    }
+
     try {
       const data = await apiFetch(PROFILE, "", undefined, "GET");
       if (data.success && data.user?.profile?.isOnboarded) {
@@ -3299,9 +3319,9 @@ function AppInner() {
             />
             <Route path="/onboarding"
               element={
-                <ProtectedRoute user={user}>
+                <OnboardingRoute user={user} profileData={profileData}>
                   <OnboardingScreen onDone={handleOnboardingDone} setToast={setToast} />
-                </ProtectedRoute>
+                </OnboardingRoute>
               }
             />
             <Route path="/share/:token" element={<PublicProgressPage />} />
